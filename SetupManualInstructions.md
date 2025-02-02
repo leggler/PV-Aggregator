@@ -411,22 +411,59 @@ If you need to make system updates or install new software:
 
 ---
 
-## **13. Summary of Steps**
-1. Flash Raspberry Pi OS Lite.
-2. Set up SSH and user (`MiniPi`).
-3. Install Python, Git, and necessary tools.
-4. Create a virtual environment (`PV-Aggregator`).
-5. Install dependencies (`sun2000_modbus`).
-6. Clone the server application from GitHub.
-7. Create a startup script.
-8. Set up a systemd service for autostart.
-9. Enable and start the service.
-10. Reboot and verify everything is working.
 
----
+## **13. Updating PV-Aggregator Later**
+If you need to update **PV-Aggregator**, run:
 
-### ✅ **Done!**
-Your **PV Aggregator server** now runs automatically on startup and after power failures. 🎉
-
-Let me know if you need modifications or debugging help! 🚀
+```bash
+cd /opt/PV-Aggregator/app
+git pull origin main
+sudo systemctl restart pv-aggregator
 ```
+
+
+## **14. Monitor PV-Aggregator and Raspberry Pi**
+Once the service is running, you can monitor its status and the overall Raspberry Pi system using these handy commands:
+
+### **Check the Status of the PV-Aggregator Service**
+```bash
+sudo systemctl status pv-aggregator
+```
+
+### **View Live Logs of the PV-Aggregator Service**
+```bash
+journalctl -u pv-aggregator -f
+```
+
+### **Check the Last 50 Log Entries for PV-Aggregator**
+```bash
+journalctl -u pv-aggregator -n 50 --no-pager
+```
+
+### **Check System-Wide Logs**
+```bash
+sudo dmesg | tail -20
+```
+
+### **Monitor CPU, Memory, and Disk Usage in Real-Time**
+```bash
+top
+```
+(Press `q` to exit.)
+
+### **View Available Disk Space**
+```bash
+df -h
+```
+
+### **Monitor Network Activity**
+```bash
+ifconfig
+```
+
+### **Check Temperature and CPU Load**
+```bash
+vcgencmd measure_temp
+uptime
+```
+
