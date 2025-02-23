@@ -4,6 +4,7 @@ import time
 import yaml
 import signal
 import sys
+from typing import Dict, Tuple
 
 from sun2000_modbus import inverter, registers
 from pymodbus.server.sync import StartTcpServer
@@ -18,12 +19,12 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Load configuration from YAML file
 with open('config.yaml', 'r') as config_file:
-    config = yaml.safe_load(config_file)
+    config: Dict[str, Dict[str, str]] = yaml.safe_load(config_file)
 
-HUAWEI_INVERTERS: dict[str, str] = config['inverters']
+HUAWEI_INVERTERS: Dict[str, str] = config['inverters']
 
 # Measurements to read from each inverter
-MEASUREMENTS: dict[str, object] = {
+MEASUREMENTS: Dict[str, registers.InverterEquipmentRegister] = {
     "active_power": registers.InverterEquipmentRegister.ActivePower,
     "Accumulated_energy_yield": registers.InverterEquipmentRegister.AccumulatedEnergyYield,
 }
@@ -38,16 +39,16 @@ data_lock: object = Lock()
 datastore: object = ModbusSequentialDataBlock(0, [0] * TOTAL_REGISTER_COUNT)
 context: object = ModbusServerContext(slaves=ModbusSlaveContext(hr=datastore), single=True)
 
-inverter_dict = {}
+inverter_dict: Dict[str, inverter.Sun2000] = {}
 
-def create_inverter_objects() -> dict:
+def create_inverter_objects() -> Dict[str, inverter.Sun2000]:
     """
     Creates inverter objects for each defined IP and attempts an initial connection.
     :return: Dictionary of inverter objects.
     """
-    inverters = {}
+    inverters: Dict[str, inverter.Sun2000] = {}
     for name, ip in HUAWEI_INVERTERS.items():
-        inv: object = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1)
+        inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1)
         try:
             inv.connect()
             logging.info(f"Connected to {name} ({ip})")
@@ -57,20 +58,20 @@ def create_inverter_objects() -> dict:
     return inverters
 
 
-def read_measurement_values(inverters: dict, last_successful: dict) -> dict:
+def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Dict[str, int]]]:
     """
     Reads measurements from inverters and returns detailed values for all measurements.
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
     :return: Dictionary containing detailed measurement values and update status.
     """
-    detailed_values = {}
+    detailed_values: Dict[str, Dict[str, Dict[str, int]]] = {}
 
     for name, inv in inverters.items():
         detailed_values[name] = {}
         for measurement, reg_enum in MEASUREMENTS.items():
             try:
-                value = inv.read_raw_value(reg_enum)
+                value: int = inv.read_raw_value(reg_enum)
                 if value is None:
                     raise ValueError(f"Inverter {name}, measurement {measurement}: Received None as value")
 
@@ -78,7 +79,7 @@ def read_measurement_values(inverters: dict, last_successful: dict) -> dict:
                     value = int(value / 100)
 
                 last_successful[name][measurement] = value
-                updated = True
+                updated: bool = True
             except Exception as e:
                 logging.error(f"Error reading {measurement} from {name}: {e}")
                 try:
@@ -97,14 +98,14 @@ def read_measurement_values(inverters: dict, last_successful: dict) -> dict:
     return detailed_values
 
 
-def aggregate_values(detailed_values: dict) -> tuple[dict, int]:
+def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, int]]]) -> Tuple[Dict[str, int], int]:
     """
     Aggregates the detailed measurement values.
     :param detailed_values: Dictionary of detailed measurement values.
     :return: Tuple of aggregated values and count of valid readings.
     """
-    aggregated_values = {key: 0 for key in MEASUREMENTS.keys()}
-    valid_readings_count = 0
+    aggregated_values: Dict[str, int] = {key: 0 for key in MEASUREMENTS.keys()}
+    valid_readings_count: int = 0
 
     for name, measurements in detailed_values.items():
         for measurement, data in measurements.items():
@@ -115,7 +116,7 @@ def aggregate_values(detailed_values: dict) -> tuple[dict, int]:
     return aggregated_values, valid_readings_count
 
 
-def update_modbus_registers(aggregated_values: dict, valid_readings_count: int) -> None:
+def update_modbus_registers(aggregated_values: Dict[str, int], valid_readings_count: int) -> None:
     """
     Updates the Modbus registers in a thread-safe manner.
     :param aggregated_values: Dictionary of aggregated measurement values.
@@ -124,8 +125,8 @@ def update_modbus_registers(aggregated_values: dict, valid_readings_count: int) 
     with data_lock:
         register_offset: int = 0
         for measurement, total_value in aggregated_values.items():
-            low = total_value & 0xFFFF
-            high = (total_value >> 16) & 0xFFFF
+            low: int = total_value & 0xFFFF
+            high: int = (total_value >> 16) & 0xFFFF
             context[0].setValues(3, register_offset, [high, low])
             logging.debug(f"Updated {measurement}: {total_value} (Regs {register_offset} & {register_offset + 1})")
             register_offset += 2
@@ -134,14 +135,14 @@ def update_modbus_registers(aggregated_values: dict, valid_readings_count: int) 
         logging.info(f"Updated Valid Readings Count: {valid_readings_count} (Reg {register_offset})")
 
 
-def main_loop(inverters: dict, last_successful: dict) -> None:
+def main_loop(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> None:
     """
     Main loop to read measurement values, aggregate them, and update Modbus registers.
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
     """
     while True:
-        detailed_values = read_measurement_values(inverters, last_successful)
+        detailed_values: Dict[str, Dict[str, Dict[str, int]]] = read_measurement_values(inverters, last_successful)
         aggregated_values, valid_readings_count = aggregate_values(detailed_values)
         update_modbus_registers(aggregated_values, valid_readings_count)
         logging.info("Aggregated Values: %s", aggregated_values)
@@ -152,7 +153,7 @@ def start_modbus_server() -> None:
     """
     Starts the Modbus TCP server with identification information.
     """
-    identity = ModbusDeviceIdentification()
+    identity: ModbusDeviceIdentification = ModbusDeviceIdentification()
     identity.VendorName = 'SolarPower'
     identity.ProductCode = 'SP'
     identity.VendorUrl = 'https://example.com'
@@ -163,7 +164,7 @@ def start_modbus_server() -> None:
     StartTcpServer(context, identity=identity, address=("0.0.0.0", 502))
 
 
-def signal_handler(sig, frame) -> None:
+def signal_handler(sig: int, frame: object) -> None:
     """
     Handles termination signals to gracefully shut down the server.
     """
@@ -183,9 +184,9 @@ if __name__ == "__main__":
 
     inverter_dict = create_inverter_objects()
 
-    last_successful: dict[str, dict[str, int]] = {name: {measurement: 0 for measurement in MEASUREMENTS} for name in inverter_dict}
+    last_successful: Dict[str, Dict[str, int]] = {name: {measurement: 0 for measurement in MEASUREMENTS} for name in inverter_dict}
 
-    update_thread = Thread(target=main_loop, args=(inverter_dict, last_successful))
+    update_thread: Thread = Thread(target=main_loop, args=(inverter_dict, last_successful))
     update_thread.daemon = True
     update_thread.start()
 
