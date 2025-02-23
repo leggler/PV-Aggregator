@@ -1,3 +1,13 @@
+"""
+Server reads out Current Power and Meter-values from Huawai sun2000 inverters listed in config.yaml viea ModbusTCP
+aggregates them, and provides them as Output on a modbus-tcp server on registers
+0,1 --> Accumulated Power in kWh (UINT32)
+2,3 --> Accumulated Meter reading in kWh (UINT32)
+4   --> number of successful readings (should be number of measurements X number of inverters ) (UINT16)
+"""
+
+
+
 import logging
 from threading import Thread, Lock
 import time
@@ -103,17 +113,16 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
                     raise ValueError(f"Inverter {name}, measurement {measurement}: Received None as value")
 
                 if measurement == "Accumulated_energy_yield":
-                    value = int(value / 100)
+                    value = int(value / 100) #for result in kWh
 
                 last_successful[name][measurement] = value
                 updated: bool = True
             except Exception as e:
-                logging.error(f"Error reading {measurement} from {name}: {e}")
                 failed_reading_counter += 1
-                logging.error(f"Failed reading counter incremented to {failed_reading_counter} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
-                if not reconnect_inverter(inv, name):
-                    value = last_successful[name][measurement]
+                logging.error(f"Error reading {measurement} from {name}: {e}. Failed Rreading counter incremented to {failed_reading_counter}")
                 updated = False
+                value = last_successful[name][measurement]
+                reconnect_inverter(inv, name)
 
             detailed_values[name][measurement] = {'value': value, 'updated': updated}
             logging.debug(f"{name} - {measurement}: {value} (Updated: {updated})")
@@ -153,7 +162,7 @@ def update_modbus_registers(aggregated_values: Dict[str, int], valid_readings_co
             register_offset += 2
 
         context[0].setValues(3, register_offset, [valid_readings_count])
-        logging.info(f"Updated Valid Readings Count: {valid_readings_count} (Reg {register_offset})")
+        logging.debug(f"Updated Valid Readings Count: {valid_readings_count} (Reg {register_offset})")
 
 def main_loop(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> None:
     """
