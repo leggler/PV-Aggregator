@@ -19,15 +19,15 @@ log_file = "/tmp/logs/solar_power_aggregator.log"
 
 file_handler = RotatingFileHandler(log_file, maxBytes=3 * 1024 * 1024, backupCount=2)
 file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.WARNING)
+file_handler.setLevel(logging.INFO)
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
-console_handler.setLevel(logging.WARNING)
+console_handler.setLevel(logging.INFO)
 
-logging.basicConfig(level=logging.WARNING, handlers=[file_handler, console_handler])
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
 
-# Create Flask app
+# Create Flask app for http-output of detailed results
 app = Flask(__name__)
 
 # Load configuration from YAML file
@@ -42,7 +42,7 @@ MEASUREMENTS: Dict[str, registers.InverterEquipmentRegister] = {
     "Accumulated_energy_yield": registers.InverterEquipmentRegister.AccumulatedEnergyYield,
 }
 
-# Calculation of the number of registers:
+# Calculation of the number of registers: (UINT32: 2 Register; UINT16: 1 Register)
 NUM_MEASUREMENTS: int = len(MEASUREMENTS)
 MEASUREMENTS_REGISTERS: int = NUM_MEASUREMENTS * 2
 TOTAL_REGISTER_COUNT: int = MEASUREMENTS_REGISTERS + 1
@@ -103,6 +103,9 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
     :return: Dictionary containing detailed measurement values and update status.
+    e.g.: {'H10-11': {'active_power': {'value': 0, 'updated': True, 'timestamp': '2025-02-23 22:04:42'},
+          'Accumulated_energy_yield': {'value': 9524, 'updated': True, 'timestamp': '2025-02-23 22:04:42'}},
+          'H3': {'active_power':...
     """
     global failed_reading_counter, detailed_values_global
     detailed_values: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -123,7 +126,7 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
             except Exception as e:
                 logging.error(f"Error reading {measurement} from {name}: {e}")
                 failed_reading_counter += 1
-                logging.error(f"Failed reading counter incremented to {failed_reading_counter} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                logging.error(f"Failed reading counter incremented to {failed_reading_counter}")
                 updated = False
                 reconnect_inverter(inv, name)
                 value = last_successful[name][measurement]
@@ -134,32 +137,33 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
     detailed_values_global = detailed_values  # Update global detailed values
     return detailed_values
 
-def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, Any]]]) -> Tuple[Dict[str, int], int]:
+def aggregate_measurement_values(detailed_values: Dict[str, Dict[str, Dict[str, Any]]]) -> Tuple[Dict[str, int], int]:
     """
     Aggregates the detailed measurement values.
     :param detailed_values: Dictionary of detailed measurement values.
     :return: Tuple of aggregated values and count of valid readings.
     """
-    aggregated_values: Dict[str, int] = {key: 0 for key in MEASUREMENTS.keys()}
+    aggregated_measurement_values: Dict[str, int] = {key: 0 for key in MEASUREMENTS.keys()}
     valid_readings_count: int = 0
 
     for name, measurements in detailed_values.items():
         for measurement, data in measurements.items():
-            aggregated_values[measurement] += data['value']
+            aggregated_measurement_values[measurement] += data['value']
             if data['updated']:
                 valid_readings_count += 1
 
-    return aggregated_values, valid_readings_count
+    return aggregated_measurement_values, valid_readings_count
 
-def update_modbus_registers(aggregated_values: Dict[str, int], valid_readings_count: int) -> None:
+
+def update_modbus_registers(aggregated_measurement_values: Dict[str, int], valid_readings_count: int) -> None:
     """
     Updates the Modbus registers in a thread-safe manner.
-    :param aggregated_values: Dictionary of aggregated measurement values.
+    :param aggregated_measurement_values: Dictionary of aggregated measurement values.
     :param valid_readings_count: Count of valid readings.
     """
     with data_lock:
         register_offset: int = 0
-        for measurement, total_value in aggregated_values.items():
+        for measurement, total_value in aggregated_measurement_values.items():
             low: int = total_value & 0xFFFF
             high: int = (total_value >> 16) & 0xFFFF
             context[0].setValues(3, register_offset, [high, low])
@@ -176,8 +180,8 @@ def main_loop(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str,
     :param last_successful: Dictionary of last successful read values.
     """
     while True:
-        detailed_values: Dict[str, Dict[str, Dict[str, Any]]] = read_measurement_values(inverters, last_successful)
-        aggregated_values, valid_readings_count = aggregate_values(detailed_values)
+        detailed_values: Dict[str, Dict[str, Dict[str, object]]] = read_measurement_values(inverters, last_successful)
+        aggregated_values, valid_readings_count = aggregate_measurement_values(detailed_values)
         update_modbus_registers(aggregated_values, valid_readings_count)
         logging.info("Aggregated Values: %s, Valid Readings Count: %d", aggregated_values, valid_readings_count)
         time.sleep(5)
