@@ -1,6 +1,6 @@
 sun2000-modbus==2.2.0
 pymodbus==2.5.3
-
+pyyaml
 
 
 
