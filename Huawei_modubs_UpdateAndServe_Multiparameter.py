@@ -6,6 +6,7 @@ import yaml
 import signal
 import sys
 from typing import Dict, Tuple, Any
+from flask import Flask, jsonify
 
 from sun2000_modbus import inverter, registers
 from pymodbus.server.sync import StartTcpServer
@@ -18,16 +19,16 @@ log_file = "/tmp/logs/solar_power_aggregator.log"
 
 file_handler = RotatingFileHandler(log_file, maxBytes=3 * 1024 * 1024, backupCount=2)
 file_handler.setFormatter(log_formatter)
-file_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.WARNING)
 
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
-console_handler.setLevel(logging.INFO)
+console_handler.setLevel(logging.WARNING)
 
-logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+logging.basicConfig(level=logging.WARNING, handlers=[file_handler, console_handler])
 
-
-
+# Create Flask app
+app = Flask(__name__)
 
 # Load configuration from YAML file
 with open('config.yaml', 'r') as config_file:
@@ -53,6 +54,7 @@ context: ModbusServerContext = ModbusServerContext(slaves=ModbusSlaveContext(hr=
 
 inverter_dict: Dict[str, inverter.Sun2000] = {}
 failed_reading_counter: int = 0  # Global counter for failed readings
+detailed_values_global: Dict[str, Dict[str, Dict[str, Any]]] = {}  # Global dictionary to store detailed values
 
 def connect_to_inverter(name: str, ip: str) -> inverter.Sun2000:
     """
@@ -90,7 +92,6 @@ def reconnect_inverter(inv: inverter.Sun2000, name: str) -> bool:
         inv.disconnect()
         time.sleep(2)
         inv.connect()
-        #logging.info(f"Reconnected to {name}")
         return True
     except Exception as re:
         logging.error(f"Reconnection failed for {name}: {re}")
@@ -103,7 +104,7 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
     :param last_successful: Dictionary of last successful read values.
     :return: Dictionary containing detailed measurement values and update status.
     """
-    global failed_reading_counter
+    global failed_reading_counter, detailed_values_global
     detailed_values: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     for name, inv in inverters.items():
@@ -127,9 +128,10 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
                 reconnect_inverter(inv, name)
                 value = last_successful[name][measurement]
 
-            detailed_values[name][measurement] = {'value': value, 'updated': updated}
+            detailed_values[name][measurement] = {'value': value, 'updated': updated, 'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')}
             logging.debug(f"{name} - {measurement}: {value} (Updated: {updated})")
 
+    detailed_values_global = detailed_values  # Update global detailed values
     return detailed_values
 
 def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, Any]]]) -> Tuple[Dict[str, int], int]:
@@ -207,6 +209,16 @@ def signal_handler(sig: int, frame: Any) -> None:
             logging.error(f"Error disconnecting from {name}: {e}")
     sys.exit(0)
 
+@app.route('/readings', methods=['GET'])
+def get_readings():
+    """
+    Endpoint to get the current detailed readings.
+    """
+    return jsonify({
+        'failed_reading_counter': failed_reading_counter,
+        'detailed_values': detailed_values_global
+    })
+
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -218,5 +230,10 @@ if __name__ == "__main__":
     update_thread: Thread = Thread(target=main_loop, args=(inverter_dict, last_successful))
     update_thread.daemon = True
     update_thread.start()
+
+    # Start Flask server on a separate thread
+    flask_thread = Thread(target=app.run, kwargs={'host': '0.0.0.0', 'port': 5000})
+    flask_thread.daemon = True
+    flask_thread.start()
 
     start_modbus_server()
