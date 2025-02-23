@@ -107,82 +107,6 @@ If you get responses, your static IP setup is correct.
 
 ---
 
-## **4. Reduce SD Card Read/Write Operations**
-
-To extend the lifespan of the SD card and improve system stability, minimize unnecessary disk writes by following these optimizations.
-
-### **1. Disable Swap File**
-The swap file can cause excessive writes. Disable it if your application doesn't need swap:
-```bash
-sudo dphys-swapfile swapoff
-sudo dphys-swapfile uninstall
-sudo systemctl disable dphys-swapfile
-```
-
-### **2. Move Logs to RAM (tmpfs)**
-System logs are frequently written to disk. Store them in RAM instead:
-
-Edit **`/etc/fstab`**:
-```bash
-sudo nano /etc/fstab
-```
-Add these lines at the end:
-```
-tmpfs /var/log tmpfs defaults,noatime,nosuid,mode=0755,size=50M 0 0
-tmpfs /var/tmp tmpfs defaults,noatime,nosuid,mode=1777,size=50M 0 0
-tmpfs /var/lib/systemd/timesync tmpfs defaults,noatime,nosuid,mode=0755,size=10M 0 0
-```
-Save and reboot:
-```bash
-sudo reboot
-```
-
-### **3. Reduce Write Frequency for System Logs**
-If you need logs but want to limit their impact on the SD card:
-```bash
-sudo journalctl --vacuum-time=1d
-```
-To limit the log size permanently, edit:
-```bash
-sudo nano /etc/systemd/journald.conf
-```
-Add/modify:
-```
-Storage=volatile
-SystemMaxUse=50M
-```
-Restart journald:
-```bash
-sudo systemctl restart systemd-journald
-```
-
-### **4. Mount `/tmp` and `/var/tmp` in RAM**
-Ensure these lines exist in **`/etc/fstab`**:
-```
-tmpfs /tmp tmpfs defaults,noatime,nosuid,size=100M 0 0
-tmpfs /var/tmp tmpfs defaults,noatime,nosuid,size=50M 0 0
-```
-
-### **5. Reduce Writes from `cron` Jobs**
-Redirect cron job output to RAM instead of logging to disk:
-```bash
-* * * * * command > /dev/null 2>&1
-```
-
-### **6. Optimize Writes in Python Application**
-- Store temporary data in **RAM (`/dev/shm`)** instead of the SD card.
-- Use an external database instead of SQLite on the SD card.
-- **Batch write operations** instead of writing small changes frequently.
-
-### **7. Enable Read-Only Mode for SD Card**
-For a nearly write-free system:
-```bash
-sudo raspi-config
-```
-- Go to **"Performance Options"** > **"Overlay File System"** and enable **read-only mode**.
-- Disable it temporarily when making updates or configuration changes.
-
----
 
 ## **5. Install Required Dependencies**
 Run:
@@ -358,7 +282,7 @@ If everything works, your PV Aggregator server will now start automatically afte
 
 ---
 
-## **11. Optional: Update Application Code Automatically**
+## **11. Optional: Update Application Code Automatically NOT RECOMENDED**
 To pull the latest changes from GitHub on boot, modify **`start_server.sh`**:
 
 ```bash
@@ -373,11 +297,37 @@ This ensures that the latest version is used every time the Raspberry Pi starts.
 
 ---
 
-## **12. Enable Read-Only Mode for SD Card**
+## **12. REDUCE SD-CARD WRITES; TEMPORAL LOGGING**
 
-To further reduce SD card writes and extend its lifespan, you can enable **read-only mode**. This prevents unnecessary disk writes while keeping the system functional.
+To further reduce SD card writes and extend its lifespan, we will first setup temporal loggin in ram, and than activate the read-only mod
+this means that logs will be lost if server shuts-down.
 
-### **Step 1: Enable Read-Only Mode**
+
+### **Step 3: Ensure Logging Works in RAM**
+
+```bash
+sudo mkdir -p /tmp/logs
+```
+
+open config file: 
+```bash
+sudo nano /etc/fstab
+```
+
+add line to config file:
+```bash
+tmpfs   /tmp/logs   tmpfs   defaults,noatime,nosuid,size=10m   0   0
+```
+
+```bash
+tmpfs   /tmp/logs   tmpfs   defaults,noatime,nosuid,size=10m   0   0
+
+```
+This allows logs to persist during runtime but they will be cleared after a reboot.
+
+
+
+### **Step x: Enable Read-Only Mode**
 Run:
 ```bash
 sudo raspi-config
@@ -392,12 +342,6 @@ sudo reboot
 ```
 After rebooting, the Raspberry Pi will operate in read-only mode, preventing most write operations to the SD card.
 
-### **Step 3: Ensure Logging Works in RAM**
-By default, system logs will no longer be written. If you need temporary logs in RAM, add this to `/etc/fstab`:
-```bash
-tmpfs /var/log tmpfs defaults,noatime,nosuid,mode=0755,size=50M 0 0
-```
-This allows logs to persist during runtime but they will be cleared after a reboot.
 
 ### **Step 4: Temporarily Disable Read-Only Mode for Updates**
 If you need to make system updates or install new software:
@@ -421,6 +365,21 @@ git pull origin main
 sudo systemctl restart pv-aggregator
 ```
 
+in case you need to also update the venv to new requirements.txt:
+
+navigate to app folder and activate VENV
+```bash
+cd /opt/PV-Aggregator/app
+source /opt/PV-Aggregator/venv/bin/activate
+```
+
+Install libraries from requirements.txt
+
+'''bash
+pip install -r /opt/PV-Aggregator/app/requirements.txt
+'''
+
+
 
 ## **14. Monitor PV-Aggregator and Raspberry Pi**
 Once the service is running, you can monitor its status and the overall Raspberry Pi system using these handy commands:
@@ -434,6 +393,14 @@ sudo systemctl status pv-aggregator
 ```bash
 journalctl -u pv-aggregator -f
 ```
+
+
+### **View Live Logs of the PV-Aggregator Service**
+```bash
+cd /tmp/logs
+read log file which is max 5MB, rolling...
+```
+
 
 ### **Check the Last 50 Log Entries for PV-Aggregator**
 ```bash
