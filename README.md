@@ -4,7 +4,7 @@
 - collectes active power and meter readings from a number of huawei sun2000 units defined in config.yaml
 - aggregates the individual readings to a total
 - provides the total number via a modbus-tcp server
-- provides the detailed results on a flask webserver as json on  http://10.10.23.13:5000/readings
+- provides the detailed results on a flask webserver as json on  http://xxx.xxx.xxx.xxx:5000/readings
 
 
 ###features:
