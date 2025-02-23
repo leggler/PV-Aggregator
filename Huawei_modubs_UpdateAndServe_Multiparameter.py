@@ -1,14 +1,5 @@
-"""
-Server reads out Current Power and Meter-values from Huawai sun2000 inverters listed in config.yaml viea ModbusTCP
-aggregates them, and provides them as Output on a modbus-tcp server on registers
-0,1 --> Accumulated Power in kWh (UINT32)
-2,3 --> Accumulated Meter reading in kWh (UINT32)
-4   --> number of successful readings (should be number of measurements X number of inverters ) (UINT16)
-"""
-
-
-
 import logging
+from logging.handlers import RotatingFileHandler
 from threading import Thread, Lock
 import time
 import yaml
@@ -22,10 +13,21 @@ from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, Mo
 from pymodbus.device import ModbusDeviceIdentification
 
 # Configure logging to file and console
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[
-    logging.FileHandler("solar_power_aggregator.log"),  # Log file saved in the current working directory
-    logging.StreamHandler()  # Log messages also printed to the console
-])
+log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+log_file = "/tmp/logs/solar_power_aggregator.log"
+
+file_handler = RotatingFileHandler(log_file, maxBytes=3 * 1024 * 1024, backupCount=2)
+file_handler.setFormatter(log_formatter)
+file_handler.setLevel(logging.INFO)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+console_handler.setLevel(logging.INFO)
+
+logging.basicConfig(level=logging.INFO, handlers=[file_handler, console_handler])
+
+
+
 
 # Load configuration from YAML file
 with open('config.yaml', 'r') as config_file:
@@ -59,7 +61,7 @@ def connect_to_inverter(name: str, ip: str) -> inverter.Sun2000:
     :param ip: IP address of the inverter.
     :return: Inverter object.
     """
-    inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1)
+    inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1.5)
     try:
         inv.connect()
         logging.info(f"Connected to {name} ({ip})")
@@ -88,7 +90,7 @@ def reconnect_inverter(inv: inverter.Sun2000, name: str) -> bool:
         inv.disconnect()
         time.sleep(2)
         inv.connect()
-        logging.info(f"Reconnected to {name}")
+        #logging.info(f"Reconnected to {name}")
         return True
     except Exception as re:
         logging.error(f"Reconnection failed for {name}: {re}")
@@ -113,16 +115,17 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
                     raise ValueError(f"Inverter {name}, measurement {measurement}: Received None as value")
 
                 if measurement == "Accumulated_energy_yield":
-                    value = int(value / 100) #for result in kWh
+                    value = int(value / 100)  # for result in kWh
 
                 last_successful[name][measurement] = value
                 updated: bool = True
             except Exception as e:
+                logging.error(f"Error reading {measurement} from {name}: {e}")
                 failed_reading_counter += 1
-                logging.error(f"Error reading {measurement} from {name}: {e}. Failed Rreading counter incremented to {failed_reading_counter}")
+                logging.error(f"Failed reading counter incremented to {failed_reading_counter} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
                 updated = False
-                value = last_successful[name][measurement]
                 reconnect_inverter(inv, name)
+                value = last_successful[name][measurement]
 
             detailed_values[name][measurement] = {'value': value, 'updated': updated}
             logging.debug(f"{name} - {measurement}: {value} (Updated: {updated})")
