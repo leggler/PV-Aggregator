@@ -10,8 +10,11 @@ from pymodbus.server.sync import StartTcpServer
 from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
 from pymodbus.device import ModbusDeviceIdentification
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging to file and console
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[
+    logging.FileHandler("solar_power_aggregator.log"),  # Log file saved in the current working directory
+    logging.StreamHandler()  # Log messages also printed to the console
+])
 
 # Load configuration from YAML file
 with open('config.yaml', 'r') as config_file:
@@ -26,10 +29,8 @@ MEASUREMENTS: dict[str, object] = {
 }
 
 # Calculation of the number of registers:
-# Each measurement is stored as a 32-bit value (2 consecutive 16-bit registers)
 NUM_MEASUREMENTS: int = len(MEASUREMENTS)
 MEASUREMENTS_REGISTERS: int = NUM_MEASUREMENTS * 2
-# Additionally, one register is reserved for the count of connected inverters (UINT16)
 TOTAL_REGISTER_COUNT: int = MEASUREMENTS_REGISTERS + 1
 
 # Create a thread-safe Modbus datastore
@@ -37,9 +38,9 @@ data_lock: object = Lock()
 datastore: object = ModbusSequentialDataBlock(0, [0] * TOTAL_REGISTER_COUNT)
 context: object = ModbusServerContext(slaves=ModbusSlaveContext(hr=datastore), single=True)
 
-inverter_dict: dict = {}
+inverter_dict = {}
 
-def create_inverter_objects() -> dict[str, object]:
+def create_inverter_objects() -> dict:
     """
     Creates inverter objects for each defined IP and attempts an initial connection.
     :return: Dictionary of inverter objects.
@@ -56,31 +57,28 @@ def create_inverter_objects() -> dict[str, object]:
     return inverters
 
 
-def read_measurement_values(inverters: dict, last_successful: dict) -> tuple[dict, int]:
+def read_measurement_values(inverters: dict, last_successful: dict) -> dict:
     """
-    Reads measurements from inverters and aggregates the values.
+    Reads measurements from inverters and returns detailed values for all measurements.
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
-    :return: Tuple of aggregated values and connected inverters count.
+    :return: Dictionary containing detailed measurement values and update status.
     """
-    aggregated_values: dict[str, int] = {key: 0 for key in MEASUREMENTS.keys()}
-    connected_inverters_count: int = 0
+    detailed_values = {}
 
-    # Iterate through all inverters
     for name, inv in inverters.items():
-        #iterate throuhg measurments (power, meter)
+        detailed_values[name] = {}
         for measurement, reg_enum in MEASUREMENTS.items():
-            # Attempt to read the raw value
             try:
                 value = inv.read_raw_value(reg_enum)
                 if value is None:
                     raise ValueError(f"Inverter {name}, measurement {measurement}: Received None as value")
-                # If this is the accumulated energy yield, divide the value by 100 to get MWh(?)
+
                 if measurement == "Accumulated_energy_yield":
                     value = int(value / 100)
-                # Update the last successful reading for this inverter and measurement.
-                last_successful[name][measurement] = value
 
+                last_successful[name][measurement] = value
+                updated = True
             except Exception as e:
                 logging.error(f"Error reading {measurement} from {name}: {e}")
                 try:
@@ -90,48 +88,62 @@ def read_measurement_values(inverters: dict, last_successful: dict) -> tuple[dic
                     logging.info(f"Reconnected to {name}")
                 except Exception as re:
                     logging.error(f"Reconnection failed for {name}: {re}")
-                # If reading fails, use the last successful value (defaults to 0 if never updated)
                 value = last_successful[name][measurement]
+                updated = False
 
-            aggregated_values[measurement] += value
-            logging.debug(f"{name} - {measurement}: {value}")
+            detailed_values[name][measurement] = {'value': value, 'updated': updated}
+            logging.debug(f"{name} - {measurement}: {value} (Updated: {updated})")
 
-        # Count inverter if it is connected
-        if inv.isConnected():
-            connected_inverters_count += 1
-
-    return aggregated_values, connected_inverters_count
+    return detailed_values
 
 
-def update_modbus_registers(aggregated_values: dict, connected_inverters_count: int) -> None:
+def aggregate_values(detailed_values: dict) -> tuple[dict, int]:
+    """
+    Aggregates the detailed measurement values.
+    :param detailed_values: Dictionary of detailed measurement values.
+    :return: Tuple of aggregated values and count of valid readings.
+    """
+    aggregated_values = {key: 0 for key in MEASUREMENTS.keys()}
+    valid_readings_count = 0
+
+    for name, measurements in detailed_values.items():
+        for measurement, data in measurements.items():
+            aggregated_values[measurement] += data['value']
+            if data['updated']:
+                valid_readings_count += 1
+
+    return aggregated_values, valid_readings_count
+
+
+def update_modbus_registers(aggregated_values: dict, valid_readings_count: int) -> None:
     """
     Updates the Modbus registers in a thread-safe manner.
     :param aggregated_values: Dictionary of aggregated measurement values.
-    :param connected_inverters_count: Count of connected inverters.
+    :param valid_readings_count: Count of valid readings.
     """
     with data_lock:
         register_offset: int = 0
-        # Store the 32-bit aggregated value as two 16-bit registers (high and low parts)
         for measurement, total_value in aggregated_values.items():
             low = total_value & 0xFFFF
             high = (total_value >> 16) & 0xFFFF
             context[0].setValues(3, register_offset, [high, low])
             logging.debug(f"Updated {measurement}: {total_value} (Regs {register_offset} & {register_offset + 1})")
             register_offset += 2
-        # Write the count of connected inverters to the additional register
-        context[0].setValues(3, register_offset, [connected_inverters_count])
-        logging.info(f"Updated Connected Inverters Count: {connected_inverters_count} (Reg {register_offset})")
+
+        context[0].setValues(3, register_offset, [valid_readings_count])
+        logging.info(f"Updated Valid Readings Count: {valid_readings_count} (Reg {register_offset})")
 
 
 def main_loop(inverters: dict, last_successful: dict) -> None:
     """
-    Main loop to read measurement values and update Modbus registers.
+    Main loop to read measurement values, aggregate them, and update Modbus registers.
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
     """
     while True:
-        aggregated_values, connected_inverters_count = read_measurement_values(inverters, last_successful)
-        update_modbus_registers(aggregated_values, connected_inverters_count)
+        detailed_values = read_measurement_values(inverters, last_successful)
+        aggregated_values, valid_readings_count = aggregate_values(detailed_values)
+        update_modbus_registers(aggregated_values, valid_readings_count)
         logging.info("Aggregated Values: %s", aggregated_values)
         time.sleep(5)
 
