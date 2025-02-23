@@ -4,7 +4,7 @@ import time
 import yaml
 import signal
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 
 from sun2000_modbus import inverter, registers
 from pymodbus.server.sync import StartTcpServer
@@ -35,11 +35,27 @@ MEASUREMENTS_REGISTERS: int = NUM_MEASUREMENTS * 2
 TOTAL_REGISTER_COUNT: int = MEASUREMENTS_REGISTERS + 1
 
 # Create a thread-safe Modbus datastore
-data_lock: object = Lock()
-datastore: object = ModbusSequentialDataBlock(0, [0] * TOTAL_REGISTER_COUNT)
-context: object = ModbusServerContext(slaves=ModbusSlaveContext(hr=datastore), single=True)
+data_lock: Lock = Lock()
+datastore: ModbusSequentialDataBlock = ModbusSequentialDataBlock(0, [0] * TOTAL_REGISTER_COUNT)
+context: ModbusServerContext = ModbusServerContext(slaves=ModbusSlaveContext(hr=datastore), single=True)
 
 inverter_dict: Dict[str, inverter.Sun2000] = {}
+failed_reading_counter: int = 0  # Global counter for failed readings
+
+def connect_to_inverter(name: str, ip: str) -> inverter.Sun2000:
+    """
+    Connects to an inverter and returns the inverter object.
+    :param name: Name of the inverter.
+    :param ip: IP address of the inverter.
+    :return: Inverter object.
+    """
+    inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1)
+    try:
+        inv.connect()
+        logging.info(f"Connected to {name} ({ip})")
+    except Exception as e:
+        logging.error(f"Could not connect to {name} ({ip}): {e}")
+    return inv
 
 def create_inverter_objects() -> Dict[str, inverter.Sun2000]:
     """
@@ -48,24 +64,35 @@ def create_inverter_objects() -> Dict[str, inverter.Sun2000]:
     """
     inverters: Dict[str, inverter.Sun2000] = {}
     for name, ip in HUAWEI_INVERTERS.items():
-        inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1)
-        try:
-            inv.connect()
-            logging.info(f"Connected to {name} ({ip})")
-        except Exception as e:
-            logging.error(f"Could not connect to {name} ({ip}): {e}")
-        inverters[name] = inv
+        inverters[name] = connect_to_inverter(name, ip)
     return inverters
 
+def reconnect_inverter(inv: inverter.Sun2000, name: str) -> bool:
+    """
+    Attempts to reconnect to an inverter.
+    :param inv: Inverter object.
+    :param name: Name of the inverter.
+    :return: True if reconnection was successful, False otherwise.
+    """
+    try:
+        inv.disconnect()
+        time.sleep(2)
+        inv.connect()
+        logging.info(f"Reconnected to {name}")
+        return True
+    except Exception as re:
+        logging.error(f"Reconnection failed for {name}: {re}")
+        return False
 
-def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Dict[str, int]]]:
+def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
     Reads measurements from inverters and returns detailed values for all measurements.
     :param inverters: Dictionary of inverter objects.
     :param last_successful: Dictionary of last successful read values.
     :return: Dictionary containing detailed measurement values and update status.
     """
-    detailed_values: Dict[str, Dict[str, Dict[str, int]]] = {}
+    global failed_reading_counter
+    detailed_values: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     for name, inv in inverters.items():
         detailed_values[name] = {}
@@ -82,14 +109,10 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
                 updated: bool = True
             except Exception as e:
                 logging.error(f"Error reading {measurement} from {name}: {e}")
-                try:
-                    inv.disconnect()
-                    time.sleep(2)
-                    inv.connect()
-                    logging.info(f"Reconnected to {name}")
-                except Exception as re:
-                    logging.error(f"Reconnection failed for {name}: {re}")
-                value = last_successful[name][measurement]
+                failed_reading_counter += 1
+                logging.error(f"Failed reading counter incremented to {failed_reading_counter} at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+                if not reconnect_inverter(inv, name):
+                    value = last_successful[name][measurement]
                 updated = False
 
             detailed_values[name][measurement] = {'value': value, 'updated': updated}
@@ -97,8 +120,7 @@ def read_measurement_values(inverters: Dict[str, inverter.Sun2000], last_success
 
     return detailed_values
 
-
-def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, int]]]) -> Tuple[Dict[str, int], int]:
+def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, Any]]]) -> Tuple[Dict[str, int], int]:
     """
     Aggregates the detailed measurement values.
     :param detailed_values: Dictionary of detailed measurement values.
@@ -114,7 +136,6 @@ def aggregate_values(detailed_values: Dict[str, Dict[str, Dict[str, int]]]) -> T
                 valid_readings_count += 1
 
     return aggregated_values, valid_readings_count
-
 
 def update_modbus_registers(aggregated_values: Dict[str, int], valid_readings_count: int) -> None:
     """
@@ -134,7 +155,6 @@ def update_modbus_registers(aggregated_values: Dict[str, int], valid_readings_co
         context[0].setValues(3, register_offset, [valid_readings_count])
         logging.info(f"Updated Valid Readings Count: {valid_readings_count} (Reg {register_offset})")
 
-
 def main_loop(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str, Dict[str, int]]) -> None:
     """
     Main loop to read measurement values, aggregate them, and update Modbus registers.
@@ -142,12 +162,11 @@ def main_loop(inverters: Dict[str, inverter.Sun2000], last_successful: Dict[str,
     :param last_successful: Dictionary of last successful read values.
     """
     while True:
-        detailed_values: Dict[str, Dict[str, Dict[str, int]]] = read_measurement_values(inverters, last_successful)
+        detailed_values: Dict[str, Dict[str, Dict[str, Any]]] = read_measurement_values(inverters, last_successful)
         aggregated_values, valid_readings_count = aggregate_values(detailed_values)
         update_modbus_registers(aggregated_values, valid_readings_count)
-        logging.info("Aggregated Values: %s", aggregated_values)
+        logging.info("Aggregated Values: %s, Valid Readings Count: %d", aggregated_values, valid_readings_count)
         time.sleep(5)
-
 
 def start_modbus_server() -> None:
     """
@@ -163,8 +182,7 @@ def start_modbus_server() -> None:
 
     StartTcpServer(context, identity=identity, address=("0.0.0.0", 502))
 
-
-def signal_handler(sig: int, frame: object) -> None:
+def signal_handler(sig: int, frame: Any) -> None:
     """
     Handles termination signals to gracefully shut down the server.
     """
@@ -176,7 +194,6 @@ def signal_handler(sig: int, frame: object) -> None:
         except Exception as e:
             logging.error(f"Error disconnecting from {name}: {e}")
     sys.exit(0)
-
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
