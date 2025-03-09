@@ -434,3 +434,9 @@ vcgencmd measure_temp
 uptime
 ```
 
+### **Redad logs (if setup temporary)**
+```bash
+nano /tmp/logs/solar_power_aggregator.log
+```
+
+
