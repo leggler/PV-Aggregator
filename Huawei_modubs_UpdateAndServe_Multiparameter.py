@@ -63,7 +63,7 @@ def connect_to_inverter(name: str, ip: str) -> inverter.Sun2000:
     :param ip: IP address of the inverter.
     :return: Inverter object.
     """
-    inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=1.5)
+    inv: inverter.Sun2000 = inverter.Sun2000(unit=1, host=ip, timeout=10, wait=3)
     try:
         inv.connect()
         logging.info(f"Connected to {name} ({ip})")
